@@ -1,11 +1,20 @@
 """Structured four-panel scripts; chat content is data, never tool instructions."""
 
 import json
+import logging
 from dataclasses import asdict, dataclass
 
 
 class TheaterError(Exception):
     """A safe, user-facing error (never include an upstream response or credential)."""
+
+
+class CandidateValidationError(TheaterError):
+    """Keep safe per-candidate reasons instead of discarding the original failures."""
+
+    def __init__(self, message: str, issues: list[str]):
+        self.issues = list(issues)
+        super().__init__(message + " " + "；".join(issues))
 
 
 @dataclass
@@ -27,7 +36,9 @@ SYSTEM_PROMPT = """你是群友四格小剧场的编剧，不是日报总结员�
 固定2×2四格，顺序左上、右上、左下、右下：铺垫、推进、转折、包袱。
 同一事件和稳定人物形象；用动作、表情和简短对话推进，禁止每格都写话题总结标题。
 每格1至2句气泡台词，每句最多24字。动作描述应具体可画，不写抽象心理分析。
-source_ids 只能选输入消息ID，最多20条，且首尾跨度不超过40条消息。
+source_ids 只能选输入消息ID，最多20条，优先选40条消息以内的一小段互动。
+群聊中间的插话不算剧情；同一事件的必要前后呼应可跨越更多消息，但不要拼接无关事件。
+只引用支撑这四格的必要消息，跨片段浓缩或虚构的结果必须在 adaptation 说明。
 只返回一个JSON对象，不使用Markdown，不追加解释，结构严格为：
 {"title":"标题","premise":"这一个故事的核心冲突","adaptation":"哪些部分经过改编",
 "source_ids":["m1","m2"],
@@ -54,29 +65,56 @@ def candidates_prompt(messages: list[Message], count: int) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-def validate_candidates(raw: str, messages: list[Message], count: int) -> list[dict]:
+def validate_candidates(raw: str, messages: list[Message], count: int, on_issue=None) -> list[dict]:
+    issues = []
+
+    def report(reason):
+        issues.append(reason)
+        if on_issue:
+            on_issue(reason)
+        else:
+            logging.getLogger(__name__).warning("Candidate validation: %s", reason)
+
+    if not isinstance(raw, str):
+        report("返回内容应为文本")
+        raise CandidateValidationError("候选格式无效，未调用绘图。", issues)
     raw = raw.strip()
     if raw.startswith("```") and raw.endswith("```"):
         raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
-        raise TheaterError("候选格式无效，未调用绘图，也不会自动重试。") from None
+    except (ValueError, TypeError) as exc:
+        detail = (
+            f"JSON解析失败（行{exc.lineno}，列{exc.colno}）"
+            if isinstance(exc, json.JSONDecodeError)
+            else "返回内容类型错误"
+        )
+        report(detail)
+        raise CandidateValidationError("候选格式无效，未调用绘图。", issues) from None
     items = data.get("candidates") if isinstance(data, dict) else None
     if not isinstance(items, list) or not 1 <= len(items) <= count:
-        raise TheaterError(f"编剧应返回1至{count}个候选，未调用绘图。")
+        report("candidates不是列表或候选数量超出范围")
+        raise CandidateValidationError(f"编剧应返回1至{count}个候选，未调用绘图。", issues)
     results, seen = [], set()
-    for item in items:
+    for index, item in enumerate(items, 1):
         try:
             story = validate_story(item, messages)
-        except TheaterError:
+        except TheaterError as exc:
+            report(f"候选{index}：{exc}")
             continue
+        selected = set(story["source_ids"])
+        positions = [i for i, message in enumerate(messages) if message.id in selected]
+        span = max(positions) - min(positions) + 1
+        if span > 40:
+            report(f"候选{index}：素材首尾覆盖{span}条消息，超过建议的40条，保留候选供确认。")
         fingerprint = json.dumps(story["panels"], sort_keys=True, ensure_ascii=False)
         if fingerprint not in seen:
             results.append(story)
             seen.add(fingerprint)
+        else:
+            report(f"候选{index}：四格内容与已有候选完全重复")
     if not results:
-        raise TheaterError("没有通过校验的完整四格候选，未调用绘图。")
+        raise CandidateValidationError("没有通过校验的完整四格候选，未调用绘图。", issues)
     return results
 
 
@@ -114,8 +152,12 @@ def story_prompt(messages: list[Message], previous: dict | None = None, feedback
 
 
 def _text(value, field: str, limit: int) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value.strip()) > limit:
-        raise TheaterError(f"分镜字段 {field} 为空、类型错误或过长，请重新取材。")
+    if not isinstance(value, str):
+        raise TheaterError(f"字段 {field} 应为文本。")
+    if not value.strip():
+        raise TheaterError(f"字段 {field} 为空。")
+    if len(value.strip()) > limit:
+        raise TheaterError(f"字段 {field} 长度为{len(value.strip())}字，超过{limit}字上限。")
     return value.strip()
 
 
@@ -138,15 +180,12 @@ def validate_story(raw: str | dict, messages: list[Message]) -> dict:
         raise TheaterError("分镜引用了不存在的素材消息。")
     if len(set(selected)) != len(selected):
         raise TheaterError("分镜素材消息ID重复。")
-    positions = [i for i, m in enumerate(messages) if m.id in selected]
-    if max(positions) - min(positions) >= 40:
-        raise TheaterError("剧情跨越太多消息，应只选择一小段连续互动。")
     people = {sources[mid].speaker: sources[mid] for mid in selected}
     cast = raw.get("cast")
     if not isinstance(cast, list) or not 1 <= len(cast) <= 3:
         raise TheaterError("四格小剧场需要1至3名主要角色。")
     clean_cast = []
-    for person in cast:
+    for cast_index, person in enumerate(cast):
         if not isinstance(person, dict) or not isinstance(person.get("id"), str):
             raise TheaterError("角色格式错误。")
         uid = person["id"]
@@ -156,7 +195,9 @@ def validate_story(raw: str | dict, messages: list[Message]) -> dict:
             {
                 "id": uid,
                 "name": people[uid].name,
-                "appearance": _text(person.get("appearance"), "appearance", 250),
+                "appearance": _text(
+                    person.get("appearance"), f"cast[{cast_index}].appearance", 250
+                ),
             }
         )
     cast_ids = {x["id"] for x in clean_cast}
@@ -171,7 +212,7 @@ def validate_story(raw: str | dict, messages: list[Message]) -> dict:
         if not isinstance(dialogue, list) or not 1 <= len(dialogue) <= 2:
             raise TheaterError("每格必须有1至2条气泡台词。")
         lines = []
-        for line in dialogue:
+        for line_index, line in enumerate(dialogue):
             if (
                 not isinstance(line, dict)
                 or not isinstance(line.get("speaker"), str)
@@ -179,7 +220,12 @@ def validate_story(raw: str | dict, messages: list[Message]) -> dict:
             ):
                 raise TheaterError("台词说话人不在本次出场角色中。")
             lines.append(
-                {"speaker": line["speaker"], "text": _text(line.get("text"), "dialogue", 24)}
+                {
+                    "speaker": line["speaker"],
+                    "text": _text(
+                        line.get("text"), f"panels[{index}].dialogue[{line_index}].text", 24
+                    ),
+                }
             )
         clean_panels.append(
             {

@@ -28,6 +28,8 @@ https://github.com/mkroen/astrbot_plugin_group_theater
 
 候选数量、画风和头像参考可在配置中调整。
 
+Chat 兼容接口的画幅和分辨率通过提示词传递，实际输出尺寸由绘图服务决定。
+
 ## 使用
 
 命令需由 **AstrBot 管理员**在群中使用。

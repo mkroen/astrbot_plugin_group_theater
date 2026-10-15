@@ -95,16 +95,21 @@ async def test_duplicate_confirm_race_submits_once(tmp_path, story, messages, pn
     store.close()
 
 
-async def test_bad_avatar_aborts_before_reservation(tmp_path, story, messages, png):
+@pytest.mark.parametrize("safe_error", [False, True])
+async def test_bad_avatar_aborts_before_reservation(tmp_path, story, messages, png, safe_error):
     store, drawing, flow = setup(tmp_path, story, png)
 
     async def bad(uid):
-        raise ValueError("download failed")
+        if safe_error:
+            raise TheaterError("拒绝从私网或保留地址下载返回图片。")
+        raise ValueError("private upstream credential")
 
     drawing.avatar = bad
     draft = await flow.draft("g", "a", messages)
-    with pytest.raises(TheaterError, match="头像"):
+    with pytest.raises(TheaterError, match="头像") as failure:
         await flow.render(draft["id"], "g", "a")
+    assert "private upstream credential" not in str(failure.value)
+    assert ("拒绝从私网或保留地址" in str(failure.value)) == safe_error
     assert store.get(draft["id"], "g", "a")["status"] == "draft" and drawing.calls == 0
     store.close()
 

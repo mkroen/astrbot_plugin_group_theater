@@ -22,3 +22,5 @@ htmlcov/
 build/
 # Local design notes and publishing checklist are not part of the public plugin.
 docs/
+# Private local replay inputs, provider credentials and raw model responses.
+.local-test/

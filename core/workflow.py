@@ -15,11 +15,12 @@ from .story import (
 
 
 class Workflow:
-    def __init__(self, store, text_generate, drawing, settings: dict):
+    def __init__(self, store, text_generate, drawing, settings: dict, on_diagnostic=None):
         self.store = store
         self.text_generate = text_generate
         self.drawing = drawing
         self.settings = dict(settings)
+        self.on_diagnostic = on_diagnostic
         for key, default, maximum in [
             ("retention_hours", 24, 720),
             ("candidate_count", 3, 5),
@@ -35,7 +36,7 @@ class Workflow:
     async def candidates(self, scope: str, owner: str, messages: list[Message]) -> list[dict]:
         count = self.settings["candidate_count"]
         raw = await self.text_generate(candidates_prompt(messages, count))
-        stories = validate_candidates(raw, messages, count)
+        stories = validate_candidates(raw, messages, count, on_issue=self.on_diagnostic)
         source = [asdict(m) for m in messages]
         ttl = self.settings["retention_hours"] * 3600
         # Persist the whole batch atomically, so partial writes cannot hide candidates.
@@ -89,9 +90,14 @@ class Workflow:
                 try:
                     refs.append(await self.drawing.avatar(uid))
                     ref_ids.append(character["id"])
-                except Exception:
+                except Exception as exc:
+                    detail = (
+                        str(exc)
+                        if isinstance(exc, TheaterError)
+                        else "请检查网络或关闭头像参考后再试。"
+                    )
                     raise TheaterError(
-                        f"角色 {character['name']} 的头像获取失败；未调用绘图。可修复网络或关闭头像后再试。"
+                        f"角色 {character['name']} 的头像获取失败；未调用绘图。{detail}"
                     ) from None
         if (
             refs

@@ -22,7 +22,7 @@ HELP = """群友四格小剧场
 """
 
 
-@register("astrbot_plugin_group_theater", "mkroen", "群友四格小剧场", "0.3.0")
+@register("astrbot_plugin_group_theater", "mkroen", "群友四格小剧场", "0.3.1")
 class GroupTheaterPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -122,6 +122,7 @@ class GroupTheaterPlugin(Star):
                     lambda p: self._generate_text(event, p),
                     self._drawing(),
                     dict(self.config.get("workflow", {})),
+                    on_diagnostic=lambda reason: logger.warning(f"小剧场分镜校验：{reason}"),
                 )
                 did = rest.strip().split(" ", 1)[0]
                 if action == "取材":
