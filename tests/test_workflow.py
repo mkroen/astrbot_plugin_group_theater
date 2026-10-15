@@ -67,18 +67,19 @@ async def test_cannot_render_other_group_or_owner(tmp_path, story, messages, png
     store.close()
 
 
-async def test_failure_consumes_quota_and_never_retries(tmp_path, story, messages, png):
+async def test_manual_retry_and_multiple_images_without_quota(tmp_path, story, messages, png):
     store, drawing, flow = setup(tmp_path, story, png, True)
     draft = await flow.draft("g", "a", messages)
     with pytest.raises(TheaterError):
         await flow.render(draft["id"], "g", "a")
-    assert store.quota(18000) == 1
-    with pytest.raises(TheaterError):
-        await flow.render(draft["id"], "g", "a")
-    second = await flow.draft("other_group", "b", messages)
-    with pytest.raises(TheaterError, match="额度"):
-        await flow.render(second["id"], "other_group", "b")
     assert drawing.calls == 1
+    assert store.get(draft["id"], "g", "a")["status"] == "failed"
+    drawing.fail = False
+    await flow.render(draft["id"], "g", "a")
+    for _ in range(3):
+        another = await flow.draft("other_group", "b", messages)
+        await flow.render(another["id"], "other_group", "b")
+    assert drawing.calls == 5
     store.close()
 
 
@@ -104,34 +105,33 @@ async def test_bad_avatar_aborts_before_reservation(tmp_path, story, messages, p
     draft = await flow.draft("g", "a", messages)
     with pytest.raises(TheaterError, match="头像"):
         await flow.render(draft["id"], "g", "a")
-    assert store.quota(18000) == 0 and drawing.calls == 0
+    assert store.get(draft["id"], "g", "a")["status"] == "draft" and drawing.calls == 0
     store.close()
 
 
-def test_restart_does_not_resubmit_and_quota_persists(tmp_path, story, messages):
+def test_restart_does_not_resubmit_but_allows_manual_retry(tmp_path, story, messages):
     now = [1000.0]
     store = Store(tmp_path, lambda: now[0])
     draft = store.create("g", "a", [], validate_story(story, messages), 86400)
-    store.reserve(draft, 1, 18000)
+    store.reserve(draft)
     store.close()
     store = Store(tmp_path, lambda: now[0])
     assert store.get(draft["id"], "g", "a")["status"] == "unknown"
-    assert store.quota(18000) == 1
-    now[0] += 18001
-    assert store.quota(18000) == 0
+    store.reserve(store.get(draft["id"], "g", "a"))
+    assert store.get(draft["id"], "g", "a")["status"] == "rendering"
     store.close()
 
 
-def test_expiry_deletes_source_but_does_not_refund_quota(tmp_path, story, messages):
+def test_expiry_deletes_source(tmp_path, story, messages):
     now = [1000.0]
     store = Store(tmp_path, lambda: now[0])
     draft = store.create("g", "a", [], validate_story(story, messages), 10)
-    store.reserve(draft, 1, 18000)
+    store.reserve(draft)
     store.finish(draft["id"], "failed")
     now[0] += 11
     with pytest.raises(TheaterError, match="过期"):
         store.get(draft["id"], "g", "a")
-    assert store.cleanup() == 1 and store.quota(18000) == 1
+    assert store.cleanup() == 1
     store.close()
 
 
@@ -141,13 +141,12 @@ def test_revision_change_blocks_old_confirmation(tmp_path, story, messages):
     draft = store.create("g", "a", [], clean, 3600)
     store.revise(draft, clean)
     with pytest.raises(TheaterError, match="修改"):
-        store.reserve(draft, 1, 18000)
-    assert store.quota(18000) == 0
+        store.reserve(draft)
     store.close()
 
 
 @pytest.mark.parametrize(
-    "key,value", [("image_window_hours", 0), ("image_limit", -1), ("retention_hours", "oops")]
+    "key,value", [("candidate_count", 0), ("retention_hours", -1), ("retention_hours", "oops")]
 )
 def test_invalid_limits_fail_closed(key, value):
     with pytest.raises(TheaterError):

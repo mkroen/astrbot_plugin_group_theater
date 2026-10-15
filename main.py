@@ -9,26 +9,20 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.drawing import DrawingClient
-from .core.source import fetch_history, pasted_messages
+from .core.source import fetch_history
 from .core.store import Store
 from .core.story import SYSTEM_PROMPT, TheaterError, candidate_card
 from .core.workflow import Workflow
 
-HELP = """群友四格小剧场（管理员）
-/小剧场 取材 [条数]：返回多个小剧场候选的合并转发，每个含ID和四格分镜
-/小剧场 编剧 昵称：发言…：粘贴对话创作；每人发言换行，不自动推断QQ身份
-/小剧场 分镜 <ID>：重新查看候选
-/小剧场 出图 <ID>：明确确认，提交一次绘图；成功后重复命令仅重发缓存图片
-/小剧场 状态 <ID>：查看结果状态
-/小剧场 取消 <ID>：取消未出图草稿
-/小剧场 额度：查看本插件滚动窗口提交数
-/小剧场 清理：删除所有已过期素材和成图
-无定时任务、无群消息监听、无自动出图、无绘图重试。
-首次使用请在插件配置中启用并填写群白名单、编剧模型及绘图入口。
+HELP = """群友四格小剧场
+/小剧场：查看帮助
+/小剧场 取材 [条数]：生成小剧场候选，默认取最近120条
+/小剧场 分镜 <ID>：查看候选分镜
+/小剧场 出图 <ID>：生成漫画，已有成图则直接重发
 """
 
 
-@register("astrbot_plugin_group_theater", "mkroen", "群友四格小剧场", "0.2.0")
+@register("astrbot_plugin_group_theater", "mkroen", "群友四格小剧场", "0.3.0")
 class GroupTheaterPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -61,7 +55,7 @@ class GroupTheaterPlugin(Star):
         return DrawingClient(settings, key)
 
     async def _generate_text(self, event, prompt):
-        provider_id = self.config.get("story_provider_id", "").strip()
+        provider_id = (self.config.get("story_provider_id") or "").strip()
         if not provider_id:
             provider = await self.context.get_using_provider_async(umo=event.unified_msg_origin)
             if not provider:
@@ -95,15 +89,21 @@ class GroupTheaterPlugin(Star):
         event.should_call_llm(False)
         event.stop_event()
         action, _, rest = str(arguments).strip().partition(" ")
-        if action in {"", "帮助", "help"}:
+        if action not in {"取材", "分镜", "出图"}:
             yield event.plain_result(HELP)
             return
         if self.closing:
             return
         group = str(event.get_group_id() or "")
-        allowed = [str(x) for x in self.config.get("allowed_groups", [])]
-        if not self.config.get("enabled", False) or not group or group not in allowed:
-            yield event.plain_result("小剧场未启用或本群不在白名单，请在插件配置中设置。")
+        allowed = {str(x).strip() for x in self.config.get("allowed_groups", []) if str(x).strip()}
+        if not self.config.get("enabled", False):
+            yield event.plain_result("小剧场未启用，请在插件配置中开启。")
+            return
+        if not group:
+            yield event.plain_result("请在群聊中使用小剧场。")
+            return
+        if allowed and group not in allowed:
+            yield event.plain_result("本群不在小剧场白名单中。")
             return
         if event.get_platform_name() != "aiocqhttp":
             yield event.plain_result("第一版仅支持 OneBot/NapCat 群聊，其他平台尚未适配。")
@@ -115,7 +115,7 @@ class GroupTheaterPlugin(Star):
         self.tasks.add(task)
         try:
             async with self.busy:
-                cleaned = self.store.cleanup()
+                self.store.cleanup()
                 scope, owner = event.unified_msg_origin, str(event.get_sender_id())
                 workflow = Workflow(
                     self.store,
@@ -135,13 +135,6 @@ class GroupTheaterPlugin(Star):
                     )
                     drafts = await workflow.candidates(scope, owner, messages)
                     yield self._candidate_result(event, drafts)
-                elif action == "编剧":
-                    # GreedyStr joins tokens; use the original body to preserve pasted newlines.
-                    body = event.get_message_str().partition("编剧")[2].strip() or rest
-                    messages = pasted_messages(body)
-                    yield event.plain_result("正在编写文字分镜；粘贴素材不自动绑定群友头像。")
-                    drafts = await workflow.candidates(scope, owner, messages)
-                    yield self._candidate_result(event, drafts)
                 elif action == "分镜":
                     yield event.plain_result(candidate_card(self.store.get(did, scope, owner)))
                 elif action == "出图":
@@ -150,27 +143,6 @@ class GroupTheaterPlugin(Star):
                     yield event.plain_result(
                         f"小剧场 {did} 已完成。再次确认将重发这张图，不会重新生成。"
                     )
-                elif action == "状态":
-                    draft = self.store.get(did, scope, owner)
-                    yield event.plain_result(
-                        f"{did} · 第{draft['revision']}稿 · {draft['status']}\n{draft['error']}"
-                    )
-                elif action == "取消":
-                    self.store.cancel(self.store.get(did, scope, owner))
-                    yield event.plain_result("已取消草稿，未调用绘图。")
-                elif action == "额度":
-                    s = workflow.settings
-                    hours, limit = int(s.get("image_window_hours", 5)), int(s.get("image_limit", 1))
-                    used = self.store.quota(hours * 3600)
-                    yield event.plain_result(
-                        f"本插件最近{hours}小时提交{used}/{limit}次。失败、超时也计数；其他插件和CPA客户端的用量不在此统计。"
-                    )
-                elif action == "清理":
-                    yield event.plain_result(
-                        f"已清理{cleaned}份过期素材及其成图。绘图额度记录保留。"
-                    )
-                else:
-                    yield event.plain_result(HELP)
         except TheaterError as exc:
             yield event.plain_result(str(exc))
         except asyncio.TimeoutError:
@@ -178,6 +150,6 @@ class GroupTheaterPlugin(Star):
         except Exception as exc:
             # Exception messages may contain URLs or provider credentials. Log type only.
             logger.error("小剧场操作失败：%s", type(exc).__name__)
-            yield event.plain_result("小剧场操作失败，未自动重试。请查看任务状态。")
+            yield event.plain_result("小剧场操作失败，请稍后再试。")
         finally:
             self.tasks.discard(task)

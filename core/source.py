@@ -73,15 +73,13 @@ def normalize_history(rows: list[dict], bot_id: str, limit: int, max_chars: int)
 
 async def fetch_history(event, count: int, max_chars: int) -> list[Message]:
     if event.get_platform_name() != "aiocqhttp" or not event.get_group_id():
-        raise TheaterError("自动取材暂只支持 OneBot/NapCat 群聊；可用“编剧”粘贴对话。")
+        raise TheaterError("取材暂只支持 OneBot/NapCat 群聊。")
     try:
         result = await event.bot.api.call_action(
             "get_group_msg_history", group_id=int(event.get_group_id()), count=count
         )
     except Exception:
-        raise TheaterError(
-            "获取本群历史失败；请确认协议端支持 get_group_msg_history，或粘贴对话。"
-        ) from None
+        raise TheaterError("获取本群历史失败；请确认协议端支持 get_group_msg_history。") from None
     if isinstance(result, dict) and isinstance(result.get("data"), dict):
         result = result["data"]
     rows = result.get("messages", []) if isinstance(result, dict) else []

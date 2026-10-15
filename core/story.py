@@ -115,7 +115,7 @@ def story_prompt(messages: list[Message], previous: dict | None = None, feedback
 
 def _text(value, field: str, limit: int) -> str:
     if not isinstance(value, str) or not value.strip() or len(value.strip()) > limit:
-        raise TheaterError(f"分镜字段 {field} 为空、类型错误或过长，请改稿。")
+        raise TheaterError(f"分镜字段 {field} 为空、类型错误或过长，请重新取材。")
     return value.strip()
 
 
@@ -196,32 +196,6 @@ def validate_story(raw: str | dict, messages: list[Message]) -> dict:
         "cast": clean_cast,
         "panels": clean_panels,
     }
-
-
-def preview(draft: dict) -> str:
-    s = draft["story"]
-    names = {x["id"]: x["name"] for x in s["cast"]}
-    rows = [
-        f"小剧场 {draft['id']} · 第{draft['revision']}稿 · {draft['status']}",
-        f"《{s['title']}》",
-        f"核心：{s['premise']}",
-        f"改编：{s['adaptation']}",
-        "角色：" + "、".join(f"{x['id']}={x['name']}（{x['appearance']}）" for x in s["cast"]),
-    ]
-    for i, p in enumerate(s["panels"], 1):
-        rows.extend(
-            [f"\n第{i}格 · {p['beat']}：{p['action']}"]
-            + [f"{names[x['speaker']]}：{x['text']}" for x in p["dialogue"]]
-        )
-    if draft["status"] == "draft":
-        rows.append(
-            f"\n仅文字预览，尚未出图。\n/小剧场 改稿 {draft['id']} 修改意见\n/小剧场 出图 {draft['id']}"
-        )
-    elif draft["status"] == "done":
-        rows.append(f"\n已完成出图，重发缓存：/小剧场 出图 {draft['id']}")
-    else:
-        rows.append("\n此任务不能再次提交绘图。" + draft.get("error", ""))
-    return "\n".join(rows)
 
 
 def drawing_prompt(story: dict, reference_ids: list[str], style: str) -> str:

@@ -2,8 +2,8 @@ plugin_type: astrbot_plugin
 name: astrbot_plugin_group_theater
 display_name: 群友四格小剧场
 short_desc: 群聊取材生成四格小剧场候选，选择ID后以群友头像为参考出图。
-desc: 从近期群聊生成多个完整四格小剧场候选，通过合并转发展示分镜，管理员选择ID后生成漫画。支持头像参考、多种绘图协议和持久化额度控制。
-version: 0.2.0
+desc: 从近期群聊生成多个完整四格小剧场候选，通过合并转发展示分镜，管理员选择ID后生成漫画。支持头像参考、多种绘图协议和成图缓存。
+version: 0.3.0
 author: mkroen
 repo: https://github.com/mkroen/astrbot_plugin_group_theater
 tags:

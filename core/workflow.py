@@ -22,8 +22,6 @@ class Workflow:
         self.settings = dict(settings)
         for key, default, maximum in [
             ("retention_hours", 24, 720),
-            ("image_window_hours", 5, 720),
-            ("image_limit", 1, 100),
             ("candidate_count", 3, 5),
         ]:
             try:
@@ -78,7 +76,7 @@ class Workflow:
             if path.is_file():
                 return path  # resend cached result; never draw twice
             raise TheaterError("结果文件已丢失；不会自动重新出图。")
-        if draft["status"] != "draft":
+        if draft["status"] not in {"draft", "failed", "unknown"}:
             raise TheaterError(f"当前状态为{draft['status']}，不会重复提交。")
         self.drawing.validate()
         refs, ref_ids = [], []
@@ -106,11 +104,7 @@ class Workflow:
             ref_ids,
             self.settings.get("style", "清晰的轻松日常漫画，简洁背景，生动表情"),
         )
-        self.store.reserve(
-            draft,
-            int(self.settings.get("image_limit", 1)),
-            int(self.settings.get("image_window_hours", 5)) * 3600,
-        )
+        self.store.reserve(draft)
         try:
             image = await self.drawing.generate(prompt, refs)
             folder = self.store.root / "images"

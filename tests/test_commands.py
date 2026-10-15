@@ -102,33 +102,6 @@ async def test_disabled_and_help_do_not_call_models(plugin_class):
     await plugin.terminate()
 
 
-async def test_paste_preserves_lines_and_text_only(plugin_class, story):
-    prompts = []
-
-    async def llm_generate(**kwargs):
-        prompts.append(json.loads(kwargs["prompt"]))
-        return SimpleNamespace(completion_text=json.dumps({"candidates": [story]}))
-
-    plugin = plugin_class(
-        SimpleNamespace(llm_generate=llm_generate),
-        {
-            "enabled": True,
-            "allowed_groups": ["123"],
-            "story_provider_id": "mock",
-        },
-    )
-    results = [x async for x in plugin.theater(Event(), "编剧 甲：我很勇敢 乙：那你先上")]
-    assert len(prompts) == 1
-    assert len(prompts[0]["messages"]) == 2
-    nodes = results[-1][0].nodes
-    assert "尚未出图" in nodes[0].content[0].text
-    assert "ID：" in nodes[1].content[0].text
-    assert all(node.uin == "789" for node in nodes)
-    assert prompts[0]["candidate_count"] == 3
-    assert plugin.store.quota(18000) == 0
-    await plugin.terminate()
-
-
 async def test_history_returns_forward_candidates(plugin_class, story):
     calls = []
 
@@ -157,7 +130,6 @@ async def test_history_returns_forward_candidates(plugin_class, story):
     event.bot = SimpleNamespace(api=SimpleNamespace(call_action=call_action))
     results = [item async for item in plugin.theater(event, "取材 10")]
     assert len(calls) == 1 and len(results[-1][0].nodes) == 2
-    assert plugin.store.quota(18000) == 0
     await plugin.terminate()
 
 
@@ -176,4 +148,58 @@ async def test_credential_reuse_without_key_rotation(plugin_class):
     plugin = plugin_class(context, {"drawing": {"credential_source_id": "test-source"}})
     client = plugin._drawing()
     assert client.key == "test-first" and client.config["api_base"] == "https://example.com/v1"
+    await plugin.terminate()
+
+
+@pytest.mark.parametrize("allowed,permitted", [([], True), (["123"], True), (["999"], False)])
+async def test_group_whitelist_empty_allows_all(plugin_class, allowed, permitted):
+    plugin = plugin_class(SimpleNamespace(), {"enabled": True, "allowed_groups": allowed})
+    results = [item async for item in plugin.theater(Event(), "分镜 missing")]
+    assert ("找不到" in results[0]) is permitted
+    if not permitted:
+        assert "白名单" in results[0]
+    await plugin.terminate()
+
+
+async def test_all_groups_does_not_enable_private_chat(plugin_class):
+    plugin = plugin_class(SimpleNamespace(), {"enabled": True})
+    event = Event()
+    event.get_group_id = lambda: ""
+    results = [item async for item in plugin.theater(event, "分镜 missing")]
+    assert "群聊" in results[0]
+    await plugin.terminate()
+
+
+@pytest.mark.parametrize("selected", ["", None, "fixed-model"])
+async def test_text_model_default_or_explicit(plugin_class, selected):
+    lookups, calls = [], []
+
+    async def get_using_provider_async(**kwargs):
+        lookups.append(kwargs["umo"])
+        return SimpleNamespace(meta=lambda: SimpleNamespace(id="session-model"))
+
+    async def llm_generate(**kwargs):
+        calls.append(kwargs["chat_provider_id"])
+        return SimpleNamespace(completion_text="mock response")
+
+    context = SimpleNamespace(
+        get_using_provider_async=get_using_provider_async, llm_generate=llm_generate
+    )
+    plugin = plugin_class(context, {"story_provider_id": selected})
+    assert await plugin._generate_text(Event(), "test") == "mock response"
+    assert calls == [selected or "session-model"]
+    assert lookups == ([] if selected else [Event.unified_msg_origin])
+    await plugin.terminate()
+
+
+@pytest.mark.parametrize("command", ["编剧", "状态", "取消", "额度", "清理", "改稿"])
+async def test_removed_commands_only_show_basic_help(plugin_class, command):
+    plugin = plugin_class(SimpleNamespace(), {"enabled": True})
+    replies = [item async for item in plugin.theater(Event(), command)]
+    assert len(replies) == 1
+    assert "/小剧场 取材" in replies[0]
+    assert "/小剧场 分镜" in replies[0]
+    assert "/小剧场 出图" in replies[0]
+    assert "/小剧场 " + command not in replies[0]
+    assert plugin.store.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
     await plugin.terminate()

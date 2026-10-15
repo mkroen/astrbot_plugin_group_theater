@@ -213,11 +213,9 @@ class DrawingClient:
         except TheaterError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError):
-            raise TheaterError(
-                "网络中断或超时，上游是否出图未知；此次提交仍计入额度，不会重试。"
-            ) from None
+            raise TheaterError("网络中断或超时，上游是否出图未知；未自动重试。") from None
         except Exception:
-            raise TheaterError("无法解析绘图结果；此次提交仍计入额度，不会重试。") from None
+            raise TheaterError("无法解析绘图结果；未自动重试。") from None
 
     async def extract(self, data: dict) -> bytes:
         candidates = []

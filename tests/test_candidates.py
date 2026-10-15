@@ -40,7 +40,7 @@ async def test_one_text_call_three_saved_candidates_select_one(tmp_path, story, 
     drafts = await flow.candidates("g", "a", messages)
     assert len(drafts) == 3 and len({d["id"] for d in drafts}) == 3
     assert len(requests) == 1 and requests[0]["candidate_count"] == 3
-    assert store.quota(18000) == 0 and draws == []
+    assert draws == []
     await flow.render(drafts[1]["id"], "g", "a")
     assert len(requests) == 1 and len(draws) == 1 and "反转1" in draws[0]
     assert store.get(drafts[0]["id"], "g", "a")["status"] == "draft"

@@ -1,4 +1,4 @@
-"""SQLite-backed drafts and global rolling-window drawing reservations."""
+"""SQLite-backed drafts and atomic rendering state."""
 
 import json
 import sqlite3
@@ -24,9 +24,6 @@ class Store:
           created REAL NOT NULL, expires REAL NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
           status TEXT NOT NULL, source TEXT NOT NULL, story TEXT NOT NULL,
           image TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '');
-        CREATE TABLE IF NOT EXISTS attempts (
-          id INTEGER PRIMARY KEY, draft_id TEXT NOT NULL, created REAL NOT NULL);
-        CREATE INDEX IF NOT EXISTS attempts_created ON attempts(created);
         """)
         # A process restart must never resubmit a possibly charged image request.
         self.db.execute(
@@ -77,33 +74,21 @@ class Store:
             raise TheaterError("分镜状态已改变或过期，不能覆盖，请重新查看。")
         return self.get(draft["id"], draft["scope"], draft["owner"])
 
-    def reserve(self, draft: dict, limit: int, window: int) -> None:
-        if window < 1 or limit < 1:
-            raise TheaterError("绘图额度及窗口必须为正数，未提交绘图。")
+    def reserve(self, draft: dict) -> None:
         now = self.clock()
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self.db.execute("SELECT * FROM drafts WHERE id=?", (draft["id"],)).fetchone()
             if (
                 not row
-                or row["status"] != "draft"
+                or row["status"] not in {"draft", "failed", "unknown"}
+                or row["status"] != draft["status"]
                 or row["revision"] != draft["revision"]
                 or row["expires"] <= now
             ):
                 raise TheaterError("分镜已修改、过期或已提交；不会重复绘图。")
             if self.db.execute("SELECT 1 FROM drafts WHERE status='rendering'").fetchone():
                 raise TheaterError("已有绘图请求正在执行，请等待结束。")
-            attempts = self.db.execute(
-                "SELECT created FROM attempts WHERE created>? ORDER BY created", (now - window,)
-            ).fetchall()
-            if limit < 1 or len(attempts) >= limit:
-                wait = (
-                    max(1, int((attempts[0]["created"] + window - now) / 60) + 1) if attempts else 1
-                )
-                raise TheaterError(f"本插件绘图额度已用完，约{wait}分钟后再试；没有发送绘图请求。")
-            self.db.execute(
-                "INSERT INTO attempts(draft_id,created) VALUES(?,?)", (draft["id"], now)
-            )
             self.db.execute("UPDATE drafts SET status='rendering' WHERE id=?", (draft["id"],))
             self.db.execute("COMMIT")
         except BaseException:
@@ -118,18 +103,6 @@ class Store:
             (status, image, error, did),
         )
 
-    def cancel(self, draft: dict):
-        changed = self.db.execute(
-            "UPDATE drafts SET status='cancelled' WHERE id=? AND status='draft'", (draft["id"],)
-        ).rowcount
-        if not changed:
-            raise TheaterError("只有未出图的草稿可以取消；已提交的上游请求不能撤回。")
-
-    def quota(self, window: int) -> int:
-        return self.db.execute(
-            "SELECT COUNT(*) FROM attempts WHERE created>?", (self.clock() - window,)
-        ).fetchone()[0]
-
     def cleanup(self) -> int:
         rows = self.db.execute(
             "SELECT id,image FROM drafts WHERE expires<=? AND status!='rendering'", (self.clock(),)
@@ -141,5 +114,4 @@ class Store:
                 if path.is_file():
                     path.unlink()
             self.db.execute("DELETE FROM drafts WHERE id=?", (row["id"],))
-        # Quota reservations intentionally survive draft deletion.
         return len(rows)

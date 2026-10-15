@@ -122,7 +122,7 @@ async def test_timeout_submits_once():
         "TEST_ONLY",
         transport=httpx.MockTransport(handler),
     )
-    with pytest.raises(TheaterError, match="不会重试"):
+    with pytest.raises(TheaterError, match="未自动重试"):
         await client.generate("x", [])
     assert len(calls) == 1
 

@@ -1,16 +1,14 @@
 {
   "enabled": {"type": "bool", "description": "启用小剧场", "default": false},
-  "allowed_groups": {"type": "list", "description": "允许使用的QQ群号", "default": [], "hint": "空列表不允许任何群。所有操作还要求 AstrBot 管理员权限。"},
-  "story_provider_id": {"type": "string", "description": "编剧文字模型", "default": "", "_special": "select_provider", "hint": "选择已配置的文字模型；留空使用当前会话文字模型。"},
+  "allowed_groups": {"type": "list", "description": "群白名单（可选）", "default": [], "hint": "留空允许所有群；填写后仅允许列表内的群。命令仍需 AstrBot 管理员权限。"},
+  "story_provider_id": {"type": "string", "description": "分析 / 编剧模型（可选）", "default": "", "_special": "select_provider", "hint": "留空跟随 AstrBot 当前会话的默认文字模型，也可从已配置的模型列表中选择固定模型。"},
   "story_timeout": {"type": "int", "description": "文字编剧超时（秒）", "default": 120},
   "history_limit": {"type": "int", "description": "单次取材最大消息数", "default": 120, "hint": "有效范围10至200；最多12000字，不被动监听或识别群图片。"},
   "workflow": {"type": "object", "description": "小剧场流程", "items": {
     "candidate_count": {"type": "int", "description": "每次取材候选数", "default": 3, "hint": "范围1至5，默认3个；一次文字模型请求生成全部完整分镜，素材不足或候选无效可少给。"},
-    "use_avatars": {"type": "bool", "description": "出图时使用选中群友头像", "default": true, "hint": "只取原始消息中已验证的QQ身份。头像将随明确的出图请求交给绘图服务。粘贴文本不推断QQ号。"},
+    "use_avatars": {"type": "bool", "description": "出图时使用选中群友头像", "default": true, "hint": "只取原始消息中已验证的QQ身份。头像将随明确的出图请求交给绘图服务。"},
     "style": {"type": "text", "description": "漫画画风", "default": "清晰的2×2四格日常漫画，统一卡通风格，简洁背景，丰富表情，中文气泡清晰，温和幽默；不画每格总结条。"},
-    "retention_hours": {"type": "int", "description": "素材与成图保留时长（小时）", "default": 24, "hint": "过期立即禁止访问；下次命令或手动清理时从磁盘删除，无后台定时任务。"},
-    "image_window_hours": {"type": "int", "description": "全插件绘图额度窗口（小时）", "default": 5},
-    "image_limit": {"type": "int", "description": "窗口内最多绘图提交数", "default": 1, "hint": "跨群共享，重启保留。失败和超时也占用；不包含其他插件、CPA或账号的用量。没有自动重试。"}
+    "retention_hours": {"type": "int", "description": "素材与成图保留时长（小时）", "default": 24, "hint": "过期立即禁止访问；下次命令时从磁盘删除，无后台定时任务。"}
   }},
   "drawing": {"type": "object", "description": "绘图入口", "items": {
     "protocol": {"type": "string", "description": "接口协议", "options": ["openai_chat", "gemini", "openai_images"], "default": "openai_chat"},
