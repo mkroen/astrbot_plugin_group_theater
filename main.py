@@ -1,6 +1,8 @@
 """AstrBot integration. All actions are explicit administrator commands."""
 
 import asyncio
+import time
+from contextlib import aclosing
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -22,7 +24,7 @@ HELP = """群友四格小剧场
 """
 
 
-@register("astrbot_plugin_group_theater", "mkroen", "群友四格小剧场", "0.3.1")
+@register("astrbot_plugin_group_theater", "mkroen", "群友四格小剧场", "0.3.2")
 class GroupTheaterPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -61,6 +63,11 @@ class GroupTheaterPlugin(Star):
             if not provider:
                 raise TheaterError("未配置可用的编剧文字模型。")
             provider_id = provider.meta().id
+        started = time.monotonic()
+        timeout = int(self.config.get("story_timeout", 120))
+        logger.info(
+            f"小剧场取材：提交编剧模型 provider={provider_id} timeout={timeout}s prompt_chars={len(prompt)}"
+        )
         try:
             response = await asyncio.wait_for(
                 self.context.llm_generate(
@@ -68,10 +75,21 @@ class GroupTheaterPlugin(Star):
                     prompt=prompt,
                     system_prompt=SYSTEM_PROMPT,
                 ),
-                timeout=int(self.config.get("story_timeout", 120)),
+                timeout=timeout,
+            )
+            logger.info(
+                f"小剧场取材：编剧模型返回 elapsed={time.monotonic() - started:.1f}s response_chars={len(response.completion_text or '')}"
             )
             return response.completion_text
-        except Exception:
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"小剧场取材：编剧模型超时 provider={provider_id} elapsed={time.monotonic() - started:.1f}s"
+            )
+            raise TheaterError(f"编剧模型在{timeout}秒内未返回，未调用绘图模型。") from None
+        except Exception as exc:
+            logger.error(
+                f"小剧场取材：编剧模型失败 provider={provider_id} error_type={type(exc).__name__} elapsed={time.monotonic() - started:.1f}s"
+            )
             raise TheaterError("编剧模型调用失败或超时，未调用绘图模型。") from None
 
     def _candidate_result(self, event, drafts):
@@ -87,7 +105,16 @@ class GroupTheaterPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def theater(self, event: AstrMessageEvent, arguments: GreedyStr):
         event.should_call_llm(False)
-        event.stop_event()
+        # A stopped event makes the scheduler abandon this async generator at
+        # its first yield. Stop propagation only after all replies are handled.
+        try:
+            async with aclosing(self._theater_impl(event, arguments)) as replies:
+                async for result in replies:
+                    yield result
+        finally:
+            event.stop_event()
+
+    async def _theater_impl(self, event, arguments):
         action, _, rest = str(arguments).strip().partition(" ")
         if action not in {"取材", "分镜", "出图"}:
             yield event.plain_result(HELP)
@@ -113,6 +140,8 @@ class GroupTheaterPlugin(Star):
             return
         task = asyncio.current_task()
         self.tasks.add(task)
+        started = time.monotonic()
+        logger.info(f"小剧场操作开始 action={action}")
         try:
             async with self.busy:
                 self.store.cleanup()
@@ -131,10 +160,17 @@ class GroupTheaterPlugin(Star):
                     if not 10 <= count <= limit:
                         raise TheaterError(f"取材条数应在10至{limit}之间。")
                     yield event.plain_result("正在取材并准备小剧场候选与四格分镜；选ID后才出图。")
+                    logger.info(f"小剧场取材：开始读取历史 count={count} timeout=30s")
                     messages = await asyncio.wait_for(
                         fetch_history(event, count, 12000), timeout=30
                     )
+                    logger.info(
+                        f"小剧场取材：素材就绪 messages={len(messages)} elapsed={time.monotonic() - started:.1f}s"
+                    )
                     drafts = await workflow.candidates(scope, owner, messages)
+                    logger.info(
+                        f"小剧场取材：候选已保存 count={len(drafts)} elapsed={time.monotonic() - started:.1f}s"
+                    )
                     yield self._candidate_result(event, drafts)
                 elif action == "分镜":
                     yield event.plain_result(candidate_card(self.store.get(did, scope, owner)))
@@ -145,12 +181,22 @@ class GroupTheaterPlugin(Star):
                         f"小剧场 {did} 已完成。再次确认将重发这张图，不会重新生成。"
                     )
         except TheaterError as exc:
+            logger.warning(f"小剧场操作未完成 action={action} reason={exc}")
             yield event.plain_result(str(exc))
         except asyncio.TimeoutError:
+            logger.warning(
+                f"小剧场读取素材超时 action={action} elapsed={time.monotonic() - started:.1f}s"
+            )
             yield event.plain_result("读取素材超时，未提交绘图。")
+        except asyncio.CancelledError:
+            logger.warning(
+                f"小剧场操作取消 action={action} elapsed={time.monotonic() - started:.1f}s"
+            )
+            raise
         except Exception as exc:
             # Exception messages may contain URLs or provider credentials. Log type only.
             logger.error("小剧场操作失败：%s", type(exc).__name__)
             yield event.plain_result("小剧场操作失败，请稍后再试。")
         finally:
             self.tasks.discard(task)
+            logger.info(f"小剧场操作结束 action={action} elapsed={time.monotonic() - started:.1f}s")

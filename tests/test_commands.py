@@ -1,9 +1,12 @@
 """Exercise the adapter offline; SDK signatures separately checked against AstrBot 4.28.2."""
 
+import asyncio
 import importlib.util
 import json
+import logging
 import sys
 import types
+from contextlib import aclosing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +24,7 @@ def plugin_class(monkeypatch, tmp_path):
 
     exports = {
         "astrbot": {},
-        "astrbot.api": {"logger": SimpleNamespace(error=lambda *a: None)},
+        "astrbot.api": {"logger": logging.getLogger("theater-test")},
         "astrbot.api.event": {
             "AstrMessageEvent": object,
             "filter": SimpleNamespace(
@@ -65,6 +68,12 @@ class Event:
     unified_msg_origin = "qq:GroupMessage:123"
     body = "/小剧场 编剧 甲：我很勇敢\n乙：那你先上"
 
+    def __init__(self):
+        self.stopped = False
+
+    def is_stopped(self):
+        return self.stopped
+
     def get_group_id(self):
         return "123"
 
@@ -96,8 +105,9 @@ class Event:
 async def test_disabled_and_help_do_not_call_models(plugin_class):
     plugin = plugin_class(SimpleNamespace(), {})
     event = Event()
-    assert "未启用" in (await anext(plugin.theater(event, "取材")))
-    assert "群友四格" in (await anext(plugin.theater(event, "")))
+    assert "未启用" in ([r async for r in plugin.theater(event, "取材")])[0]
+    event = Event()
+    assert "群友四格" in ([r async for r in plugin.theater(event, "")])[0]
     assert event.llm is False and event.stopped
     await plugin.terminate()
 
@@ -128,8 +138,91 @@ async def test_history_returns_forward_candidates(plugin_class, story):
     )
     event = Event()
     event.bot = SimpleNamespace(api=SimpleNamespace(call_action=call_action))
-    results = [item async for item in plugin.theater(event, "取材 10")]
+    results = await consume_like_scheduler(plugin.theater(event, "取材 10"), event)
     assert len(calls) == 1 and len(results[-1][0].nodes) == 2
+    assert len(results) == 2 and "正在取材" in results[0]
+    assert event.is_stopped() and event.llm is False
+    assert not plugin.tasks and not plugin.busy.locked()
+    await plugin.terminate()
+
+
+async def consume_like_scheduler(replies, event):
+    """AstrBot stops consuming a handler when the event is stopped at a yield."""
+    results = []
+    async with aclosing(replies):
+        async for reply in replies:
+            if event.is_stopped():
+                break
+            results.append(reply)
+            if event.is_stopped():
+                break
+    return results
+
+
+@pytest.mark.parametrize("failure", [asyncio.TimeoutError, RuntimeError])
+async def test_model_failure_replies_and_safe_logs(plugin_class, failure, caplog):
+    secret = "private-upstream-response-and-key"
+
+    async def llm_generate(**kwargs):
+        raise failure(secret)
+
+    async def call_action(*args, **kwargs):
+        return {"messages": [{"sender": {"user_id": "1"}, "message": "private-chat"}]}
+
+    plugin = plugin_class(
+        SimpleNamespace(llm_generate=llm_generate),
+        {"enabled": True, "story_provider_id": "mock", "story_timeout": 120},
+    )
+    event = Event()
+    event.bot = SimpleNamespace(api=SimpleNamespace(call_action=call_action))
+    with caplog.at_level(logging.INFO, logger="theater-test"):
+        results = await consume_like_scheduler(plugin.theater(event, "取材"), event)
+    assert len(results) == 2
+    assert ("120秒内未返回" if failure is asyncio.TimeoutError else "模型调用失败") in results[-1]
+    assert "提交编剧模型" in caplog.text
+    assert (
+        "编剧模型超时" if failure is asyncio.TimeoutError else "error_type=RuntimeError"
+    ) in caplog.text
+    assert secret not in caplog.text and "private-chat" not in caplog.text
+    assert not plugin.tasks and not plugin.busy.locked()
+    assert event.is_stopped()
+    await plugin.terminate()
+
+
+async def test_closing_after_progress_releases_lock(plugin_class):
+    plugin = plugin_class(SimpleNamespace(), {"enabled": True})
+    event = Event()
+    replies = plugin.theater(event, "取材")
+    assert "正在取材" in await anext(replies)
+    assert plugin.busy.locked() and not event.is_stopped()
+    await replies.aclose()
+    assert not plugin.tasks and not plugin.busy.locked()
+    assert event.is_stopped()
+    await plugin.terminate()
+
+
+async def test_cancelling_model_request_releases_lock(plugin_class):
+    entered = asyncio.Event()
+
+    async def llm_generate(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def call_action(*args, **kwargs):
+        return {"messages": [{"sender": {"user_id": "1"}, "message": "example"}]}
+
+    plugin = plugin_class(
+        SimpleNamespace(llm_generate=llm_generate), {"enabled": True, "story_provider_id": "mock"}
+    )
+    event = Event()
+    event.bot = SimpleNamespace(api=SimpleNamespace(call_action=call_action))
+    task = asyncio.create_task(consume_like_scheduler(plugin.theater(event, "取材"), event))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not plugin.tasks and not plugin.busy.locked()
+    assert event.is_stopped()
     await plugin.terminate()
 
 
